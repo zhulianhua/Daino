@@ -1,0 +1,6 @@
+#!/bin/bash
+
+cd $PBS_O_WORKDIR
+NPROCS=`wc -l < $PBS_NODEFILE`
+
+time mpirun -np $NPROCS ./Dizzy 1>stdout 2>stderr

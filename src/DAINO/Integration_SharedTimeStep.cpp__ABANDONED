@@ -1,0 +1,243 @@
+
+#ifndef INDIVIDUAL_TIMESTEP
+
+
+
+#include "DAINO.h"
+
+static void AdvanceFluid_SharedTimeStep( const int lv, const double dt, const double dTime, const bool GetMaxCFL,
+                                         const bool Refinement );
+
+extern Timer_t *Timer_Flu_Advance [NLEVEL];
+extern Timer_t *Timer_FixUp       [NLEVEL];
+extern Timer_t *Timer_Flag        [NLEVEL];
+extern Timer_t *Timer_Refine      [NLEVEL];
+extern Timer_t *Timer_GetBuf      [NLEVEL][6];
+extern Timer_t *Timer_Flu_Total   [NLEVEL];
+#ifdef GRAVITY
+extern Timer_t *Timer_Gra_Restrict[NLEVEL];
+extern Timer_t *Timer_Gra_Advance [NLEVEL];
+#endif
+
+
+
+
+//-------------------------------------------------------------------------------------------------------
+// Function    :  Integration_SharedTimeStep
+// Description :  Advance all physical attributes one global step by the shared time-step scheme
+//
+// Parameter   :  dt    : Time interval to advance solution (comoving: dt != dTime <--> physical: dt == dTime)
+//                dTime : Time interval to update physical time 
+//-------------------------------------------------------------------------------------------------------
+void Integration_SharedTimeStep( const double dt, const double dTime )
+{
+
+
+// advance fluid by the forward sweeping (x->y->z)
+// ==========================================================================================================
+   TIMING_FUNC(   AdvanceFluid_SharedTimeStep( 0, 0.5*dt, 0.5*dTime, false, false ),
+                  Timer_Flu_Total[0],   true   );
+// ==========================================================================================================
+
+
+
+#  ifdef GRAVITY
+// evaluate gravitational potential and advance fluid variables by potential gradient
+// ==========================================================================================================
+   for (int lv=0; lv<NLEVEL; lv++)
+   {
+      if ( NPatchTotal[lv] != 0 )
+      {
+         if ( OPT__VERBOSE  &&  MPI_Rank == 0 )
+            Aux_Message( stdout, "   Lv %2d: Gra_AdvanceDt, counter = %8u ... ", lv, AdvanceCounter[lv] );
+
+         if ( lv > 0 )
+         {
+            TIMING_FUNC(   Gra_AdvanceDt( lv, NULL_REAL, dt, patch->FluSg[lv], true, false, false ),
+                           Timer_Gra_Advance[lv],    true   );
+         }
+         else
+                           Gra_AdvanceDt( lv, NULL_REAL, dt, patch->FluSg[lv], true, false, false );
+
+         if ( lv > 0 )  patch->PotSg[lv] = patch->FluSg[lv];
+
+         if ( lv != NLEVEL-1  &&  OPT__FIXUP_RESTRICT )
+         {
+            TIMING_FUNC(   Flu_Restrict( lv, patch->FluSg[lv+1], patch->FluSg[lv], NULL_INT, NULL_INT, _FLU ),
+                           Timer_Gra_Restrict[lv],   true   );
+         }
+
+         if ( lv > 0 )
+         {
+            TIMING_FUNC(   Buf_GetBufferData( patch, lv, patch->PotSg[lv], 2, POT_PARA_BUF, 3, NULL_INT, true ),
+                           Timer_GetBuf[lv][1],      true   );
+
+            TIMING_FUNC(   Buf_GetBufferData( patch, lv, patch->FluSg[lv], 1, FLU_PARA_BUF, 3, NULL_INT, true ),
+                           Timer_GetBuf[lv][2],      true   );
+         }
+
+         if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "done\n" );
+
+      } // if ( NPatchTotal[lv] != 0 )
+   } // for (int lv=0; lv<NLEVEL; lv++)
+// ==========================================================================================================
+#  endif // #ifdef GRAVITY
+
+
+
+// advance fluid by the backward sweeping (z->y->x)
+// ==========================================================================================================
+   TIMING_FUNC(   AdvanceFluid_SharedTimeStep( 0, 0.5*dt, 0.5*dTime, OPT__ADAPTIVE_DT, true ),
+                  Timer_Flu_Total[0],   true   );
+// ==========================================================================================================
+
+} // FUNCTION : Integration_SharedTimeStep
+
+
+
+//-------------------------------------------------------------------------------------------------------
+// Function    :  AdvanceFluid_SharedTimeStep
+// Description :  Use the shared time-step scheme to advance all fluid variables by "dt" time-step
+//                at levels >= "lv"
+//
+// Parameter   :  lv         : The targeted refinement level
+//                dt    : Time interval to advance solution (comoving: dt != dTime <--> physical: dt == dTime)
+//                dTime : Time interval to update physical time 
+//                GetMaxCFL  : Evaluate the maximum (fluid velocity + sound speed) for time-step estimation
+//                             in the end of the GPU fluid solver
+//                Refinement : true  --> Perform refinement if "(Step+1)%REGRID_COUNT == 0"
+//                             false --> Do NOT perform refinement
+//-------------------------------------------------------------------------------------------------------
+void AdvanceFluid_SharedTimeStep( const int lv, const double dt, const double dTime, const bool GetMaxCFL,
+                                  const bool Refinement )
+{
+
+// advance the current level
+// ===============================================================================================
+   if ( OPT__VERBOSE  &&  MPI_Rank == 0 )
+      Aux_Message( stdout, "   Lv %2d: Flu_AdvanceDt, counter = %8u ... ", lv, AdvanceCounter[lv] );
+
+   TIMING_FUNC(   Flu_AdvanceDt( lv, NULL_REAL, dt, 1-patch->FluSg[lv], false, false ),
+                  Timer_Flu_Advance[lv],   true   );
+
+   patch->FluSg  [lv] = 1 - patch->FluSg[lv];
+   Time          [lv] += dTime;
+   AdvanceCounter[lv] ++;
+   if ( AdvanceCounter[lv] >= __UINT_MAX__ )    Aux_Message( stderr, "WARNING : AdvanceCounter over-flow !!\n" );
+
+   if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "done\n" );
+// ===============================================================================================
+
+
+   if ( lv != NLEVEL-1  &&  NPatchTotal[lv+1] != 0 )
+   {
+
+//    enter the next refinement level
+// ===============================================================================================
+      TIMING_FUNC(   AdvanceFluid_SharedTimeStep( lv+1, dt, dTime, GetMaxCFL, Refinement ),
+                     Timer_Flu_Total[lv+1],   true   );
+// ===============================================================================================
+
+
+//    correct data at the current level by using data at the next finer level
+// ===============================================================================================
+      if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "   Lv %2d: Flu_FixUp %24s... ", lv, "" );
+
+      if ( OPT__FIXUP_FLUX )
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv, NULL_INT, 4, NULL_INT, 3, NULL_INT, true ),
+                     Timer_FixUp[lv],   false   );
+
+      TIMING_FUNC(   Flu_FixUp( lv, dt ),  Timer_FixUp[lv],   true   );
+
+      if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "done\n" );
+// ===============================================================================================
+
+   }
+
+
+// get the buffer data
+// ===============================================================================================
+   if ( AdvanceCounter[lv]%2 == 1 )
+   {
+#     ifdef GRAVITY  // for the Poisson solver
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv, patch->FluSg[lv], 3, RHO_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_GetBuf[lv][0],   true  );
+#     else           // for the Fluid solver
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv, patch->FluSg[lv], 1, FLU_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_GetBuf[lv][0],   true  );
+#     endif
+   }
+
+   else              // for the Fluid solver
+   {
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv, patch->FluSg[lv], 1, FLU_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_GetBuf[lv][3],   true  ); 
+   }
+// ===============================================================================================
+
+
+// refinement ( lv -> lv+1 )
+   if ( Refinement  &&  lv != NLEVEL-1  &&  (Step+1)%REGRID_COUNT == 0 )
+   {
+
+//    flag the current level for refinement
+// ===============================================================================================
+      if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "   Lv %2d: Flag %29s... ", lv, "" );
+
+#     ifdef LOAD_BALANCE
+      TIMING_FUNC(   Flag_Real( lv, true ),            Timer_Flag[lv],   true    );
+#     else
+      TIMING_FUNC(   Flag_Real( lv, true ),            Timer_Flag[lv],   false   );
+
+      TIMING_FUNC(   MPI_ExchangeBoundaryFlag( lv ),   Timer_Flag[lv],   false   );
+
+      TIMING_FUNC(   Flag_Buffer( lv ),                Timer_Flag[lv],   true    );
+#     endif
+
+      if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "done\n" );
+// ===============================================================================================
+
+
+//    create patches at the next finer level
+// ===============================================================================================
+      if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "   Lv %2d: Refine %27s... ", lv, "" );
+
+      TIMING_FUNC(   Refine( lv ),                      Timer_Refine[lv],   false   );
+
+#     ifdef LOAD_BALANCE
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv,   patch->FluSg[lv  ], 7, FLU_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_Refine[lv],    false   );
+#     ifdef GRAVITY
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv,   patch->PotSg[lv  ], 8, POT_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_Refine[lv],    false   );
+#     endif
+#     endif // #ifdef LOAD_BALANCE
+
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv+1, patch->FluSg[lv+1], 7, FLU_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_Refine[lv],   false   );
+
+#     ifdef GRAVITY
+      TIMING_FUNC(   Buf_GetBufferData( patch, lv+1, patch->PotSg[lv+1], 8, POT_PARA_BUF, 3, NULL_INT, true ),
+                     Timer_Refine[lv],   false   );
+#     endif
+
+      Time[lv+1] = Time[lv];
+
+      if ( OPT__VERBOSE  &&  MPI_Rank == 0 )    Aux_Message( stdout, "done\n" );
+// ===============================================================================================
+
+   } // if ( Refinement  &&  lv != NLEVEL-1  &&  (Step+1)%REGRID_COUNT == 0 )
+
+#  ifdef TIMING
+   else
+   {
+      Timer_Flag  [lv]->WorkingID ++;
+      Timer_Refine[lv]->WorkingID ++;
+   }
+#  endif
+
+} // FUNCTION : AdvanceFluid_SharedTimeStep
+
+
+
+#endif // #ifndef INDIVIDUAL_TIMESTEP

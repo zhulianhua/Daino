@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -N DAINO_GetCube.1.2.2
+#PBS -q dirac_reg
+#PBS -V
+#PBS -l walltime=6:00:00
+#PBS -l nodes=1:ppn=1:fermi
+
+cd $PBS_O_WORKDIR
+export NPROCS=`wc -l < $PBS_NODEFILE`
+
+FILE_IN=XXX
+START_ID=???
+END_ID=???
+
+source MultiFiles__DAINO_GetCube.sh $FILE_IN $START_ID $END_ID 1>stdout 2>stderr
+

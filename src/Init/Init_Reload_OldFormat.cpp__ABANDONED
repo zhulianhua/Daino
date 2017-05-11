@@ -1,0 +1,355 @@
+
+#include "DAINO.h"
+
+#warning : ABANDON !!
+
+
+
+//-------------------------------------------------------------------------------------------------------
+// Function    :  Init_Reload_OldFormat
+// Description :  Reload a previous output with the "OLD data format" as the initial condition
+//
+// Note        :  a. Set "OPT__RESTART_FORMAT = 0" to enable this function 
+//                b. Invoke by the function "Init_Reload"
+//                c. This function will always load the file named "RESTART"  
+//                --> You can just make a symbolic link named RESTART to the file you want to use as the
+//                    initial condition
+//-------------------------------------------------------------------------------------------------------
+void Init_Reload_OldFormat()
+{
+
+   if ( MPI_Rank == 0 )    Aux_Message( stdout, "Init_Reload_OldFormat ...\n" ); 
+
+
+   const char FileName[] = "RESTART";
+
+   FILE *File = fopen( FileName, "rb" );
+
+   if ( File == NULL  &&  MPI_Rank == 0 )
+   {
+      fprintf( stderr, "ERROR : the file \"%s\" does not exist !!\n", FileName );
+      MPI_Exit();
+   }
+
+
+// load the simulation parameters (the prefix "OLD" indicate the output parameters that have been abandoned)
+   int OLD_refine_ratio, OLD_flu_block_size_y;
+   int patch_size, flu_ghost_size, nlevel, max_patch, pot_ghost_size;
+   int nx0_tot[3], regrid_count, mpi_nrank, mpi_nrank_x[3];
+   int NX0_AllRank[MPI_NRank][3], NRealPatch_AllRank[MPI_NRank][NLEVEL], NDataPatch_AllRank[MPI_NRank];
+   real gamma, newton_g;
+   double dt__cfl, omega_m0;
+   bool  gravity, opt__output_pot;
+
+   fread( &gravity,              sizeof(bool),           1,             File );
+
+   fread( &patch_size,           sizeof(int),            1,             File );
+   fread( &OLD_refine_ratio,     sizeof(int),            1,             File );
+   fread( &flu_ghost_size,       sizeof(int),            1,             File );
+   fread( &nlevel,               sizeof(int),            1,             File );
+   fread( &OLD_flu_block_size_y, sizeof(int),            1,             File );
+   fread( &max_patch,            sizeof(int),            1,             File );
+   fread( &pot_ghost_size,       sizeof(int),            1,             File );
+   
+   fread( &gamma,                sizeof(real),           1,             File );
+   fread( nx0_tot,               sizeof(int),            3,             File );
+   fread( &dt__cfl,              sizeof(double),         1,             File );
+   fread( &regrid_count,         sizeof(int),            1,             File );
+   fread( &mpi_nrank,            sizeof(int),            1,             File );
+   fread( mpi_nrank_x,           sizeof(int),            3,             File );
+   fread( &newton_g,             sizeof(real),           1,             File );
+   fread( &omega_m0,             sizeof(double),         1,             File );
+   fread( &opt__output_pot,      sizeof(bool),           1,             File );
+
+
+// verify parameters before loading any size-dependent parameters
+   if ( MPI_Rank == 0 )
+   {
+
+#     ifdef GRAVITY
+      if ( !gravity )
+      {
+         fprintf( stderr, "ERROR : the RESTART file is for fluid only (NO gravity) !!\n" );
+         MPI_Exit();
+      }
+#     else
+      if ( gravity )
+      {
+         fprintf( stderr, "ERROR : the RESTART file is for fluid + gravity !!\n" );
+         MPI_Exit();
+      }
+#     endif
+
+      if ( patch_size != PATCH_SIZE )
+      {
+         fprintf( stderr, "ERROR : restart file PATCH_SIZE = %d, parameter file PATCH_SIZE = %d !!\n", 
+                  patch_size, PATCH_SIZE );
+         MPI_Exit();
+      }
+
+      if ( flu_ghost_size != FLU_GHOST_SIZE )
+      {
+         fprintf( stderr, "WARNING : restart file FLU_GHOST_SIZE = %d, parameter file FLU_GHOST_SIZE = %d !!\n",
+                  flu_ghost_size, FLU_GHOST_SIZE );
+      }
+
+      if ( nlevel != NLEVEL )
+      {
+         fprintf( stderr, "ERROR : restart file NLEVEL = %d, parameter file NLEVEL = %d !!\n", nlevel, NLEVEL );
+         MPI_Exit();
+      }
+
+      if ( max_patch != MAX_PATCH )
+      {
+         fprintf( stderr, "WARNING : restart file MAX_PATCH = %d, parameter file MAX_PATCH = %d !!\n", 
+                  max_patch, MAX_PATCH );
+      }
+      
+      if ( gamma != GAMMA )
+      {
+         fprintf( stderr, "WARNING : restart file GAMMA = %13.7e, parameter file GAMMA = %13.7e !!\n", 
+                  gamma, GAMMA );
+      }
+
+      if ( nx0_tot[0] != NX0_TOT[0] )
+      {
+         fprintf( stderr, "ERROR : restart file NX0_TOT[0] = %d, parameter file NX0_TOT[0] = %d !!\n", 
+                  nx0_tot[0], NX0_TOT[0] );
+         MPI_Exit();
+      }
+
+      if ( nx0_tot[1] != NX0_TOT[1] )
+      {
+         fprintf( stderr, "ERROR : restart file NX0_TOT[1] = %d, parameter file NX0_TOT[1] = %d !!\n", 
+                  nx0_tot[1], NX0_TOT[1] );
+         MPI_Exit();
+      }
+
+      if ( nx0_tot[2] != NX0_TOT[2] )
+      {
+         fprintf( stderr, "ERROR : restart file NX0_TOT[2] = %d, parameter file NX0_TOT[2] = %d !!\n", 
+                  nx0_tot[2], NX0_TOT[2] );
+         MPI_Exit();
+      }
+
+      if ( mpi_nrank != MPI_NRank )
+      {
+         fprintf( stderr, "ERROR : RESTART file MPI_NRank = %d <-> parameter file MPI_NRank = %d !!\n", 
+                  mpi_nrank, MPI_NRank );
+         MPI_Exit();
+      }
+
+      if ( mpi_nrank_x[0] != MPI_NRank_X[0] )
+      {
+         fprintf( stderr, "ERROR : RESTART file MPI_NRank_X[0] = %d <-> parameter file MPI_NRank_X[0] = %d !!\n", mpi_nrank_x[0], MPI_NRank_X[0] );
+         MPI_Exit();
+      }
+
+      if ( mpi_nrank_x[1] != MPI_NRank_X[1] )
+      {
+         fprintf( stderr, "ERROR : RESTART file MPI_NRank_X[1] = %d <-> parameter file MPI_NRank_X[1] = %d !!\n", mpi_nrank_x[1], MPI_NRank_X[1] );
+         MPI_Exit();
+      }
+
+      if ( mpi_nrank_x[2] != MPI_NRank_X[2] )
+      {
+         fprintf( stderr, "ERROR : RESTART file MPI_NRank_X[2] = %d <-> parameter file MPI_NRank_X[2] = %d !!\n", mpi_nrank_x[2], MPI_NRank_X[2] );
+         MPI_Exit();
+      }
+
+      if ( dt__cfl != DT__CFL ) 
+      {
+         fprintf( stderr, "WARNING : restart file CFL = %13.7e, parameter file CFL = %13.7e !!\n", 
+                  dt__cfl, DT__CFL );
+      }
+
+      if ( regrid_count != REGRID_COUNT )
+      {
+         fprintf( stderr, "WARNING : restart file REGRID_COUNT = %d, parameter file REGRID_COUNT = %d !!\n", 
+                  regrid_count, REGRID_COUNT );
+      }
+
+#     ifdef GRAVITY
+      if ( pot_ghost_size != POT_GHOST_SIZE )
+      {
+         fprintf( stderr, "WARNING : restart file POT_GHOST_SIZE = %d, parameter file POT_GHOST_SIZE = %d !!\n", 
+                  pot_ghost_size, POT_GHOST_SIZE );
+      }
+
+      if ( newton_g != NEWTON_G )
+      {
+         fprintf( stderr, "WARNING : restart file NEWTON_G = %14.7e, parameter file NEWTON_G = %14.7e !!\n",
+                  newton_g, NEWTON_G );
+      }
+#     endif
+
+#     ifdef COMOVING
+      if ( omega_m0 != OMEGA_M0 )
+      {
+         fprintf( stderr, "WARNING : restart file OMEGA_M0 = %14.7e, parameter file OMEGA_M0 = %14.7e !!\n",
+                  omega_m0, OMEGA_M0 );
+      }
+#     endif
+
+   }
+
+
+// load the remaining parameters
+   fread( &DumpID,               sizeof(int),            1,                File );
+   fread( Time,                  sizeof(double),         NLEVEL,           File );
+   fread( &Step,                 sizeof(long int),       1,                File );
+   fread( NRealPatch_AllRank,    sizeof(int),            NLEVEL*MPI_NRank, File );
+   fread( NDataPatch_AllRank,    sizeof(int),            MPI_NRank,        File );
+   fread( NX0_AllRank,           sizeof(int),            3*MPI_NRank,      File );
+   fread( AdvanceCounter,        sizeof(uint),           NLEVEL,           File );
+
+
+// set the next dump ID
+   DumpID ++;
+
+
+// properly set the file position indicator for each process
+   long int HeaderSize, DataSize[MPI_NRank], ExpectSize, InputSize, offset;
+   int NVar;   // number of variables ( NCOMP or NCOMP+1 -> potential )
+
+   HeaderSize =   sizeof(int     )*( 16 + NLEVEL*MPI_NRank + 4*MPI_NRank )
+                + sizeof(long int)*( 1                                   )
+                + sizeof(uint    )*( NLEVEL                              )
+                + sizeof(real    )*( 2                                   )
+                + sizeof(double  )*( 2 + NLEVEL                          )
+                + sizeof(bool    )*( 2                                   );
+
+   offset   = HeaderSize;
+   NVar     = ( opt__output_pot )   ?  NCOMP+1 : NCOMP;
+
+   for (int rank=0; rank<MPI_NRank; rank++)
+   {
+      DataSize[rank] = 0;
+
+//    5 = corner(3) + father(1) + son(1)
+      for (int lv=0; lv<NLEVEL; lv++)     DataSize[rank] += NRealPatch_AllRank[rank][lv]*5*sizeof(int);
+
+      DataSize[rank] += NDataPatch_AllRank[rank]*PATCH_SIZE*PATCH_SIZE*PATCH_SIZE*NVar*sizeof(real);
+   }
+
+   for (int rank=0; rank<MPI_Rank; rank++)      offset += DataSize[rank];
+
+
+// verify the size of the RESTART file
+   ExpectSize = HeaderSize;
+   for (int rank=0; rank<MPI_NRank; rank++)     ExpectSize += DataSize[rank];
+
+   fseek( File, 0, SEEK_END );
+   InputSize = ftell(File);
+
+   if ( InputSize != ExpectSize  )
+   {
+      fprintf( stderr, "ERROR : \"the size of the file <%s> is incorrect\" --> input = %ld, expect = %ld !!\n", 
+               FileName, InputSize, ExpectSize );
+      fprintf( stderr, "        file <%s>, line <%d>, function <%s>\n", __FILE__, __LINE__,  __FUNCTION__  );
+      MPI_Exit();
+   }
+
+   fclose( File );
+
+
+// begin to load data 
+   int temp_corner[3], temp_father, temp_son;
+
+// array for re-ordering the fluid data from "xyzv" to "vxyz"
+   real (*InvData_Flu)[PATCH_SIZE][PATCH_SIZE][NCOMP] = new real [PATCH_SIZE][PATCH_SIZE][PATCH_SIZE][NCOMP];
+
+   for (int TargetRank=0; TargetRank<MPI_NRank; TargetRank++)
+   {
+      if ( MPI_Rank == TargetRank )
+      {
+         File = fopen( "RESTART", "rb" );
+         fseek( File, offset, SEEK_SET );
+
+         for (int lv=0; lv<NLEVEL; lv++)
+         for (int PID=0; PID<NRealPatch_AllRank[MPI_Rank][lv]; PID++)
+         {
+            fread( temp_corner,  sizeof(int), 3, File );
+            fread( &temp_father, sizeof(int), 1, File );
+            fread( &temp_son,    sizeof(int), 1, File );
+
+            patch->pnew( lv, temp_corner[0], temp_corner[1], temp_corner[2], temp_father, true, true );
+            patch->ptr[0][lv][PID]->son = temp_son;
+         }
+
+         for (int lv=0; lv<NLEVEL; lv++)
+         for (int PID=0; PID<NRealPatch_AllRank[MPI_Rank][lv]; PID++)
+         {
+            if ( patch->ptr[0][lv][PID]->son == -1 )
+            {
+
+//             load fluid variables
+               fread( InvData_Flu, sizeof(real), PATCH_SIZE*PATCH_SIZE*PATCH_SIZE*NCOMP, File );
+
+               for (int v=0; v<NCOMP; v++)
+               for (int k=0; k<PATCH_SIZE; k++)
+               for (int j=0; j<PATCH_SIZE; j++)
+               for (int i=0; i<PATCH_SIZE; i++)    
+                  patch->ptr[ patch->FluSg[lv] ][lv][PID]->fluid[v][k][j][i] = InvData_Flu[k][j][i][v];
+
+#              ifdef GRAVITY
+//             load potential
+               if ( opt__output_pot )
+                  fread( patch->ptr[ patch->PotSg[lv] ][lv][PID]->pot, sizeof(real), 
+                         PATCH_SIZE*PATCH_SIZE*PATCH_SIZE, File );
+#              endif
+
+            }
+         }
+
+         fclose( File );
+      }
+
+      MPI_Barrier( MPI_COMM_WORLD );
+
+   } // for (int TargetRank=0; TargetRank<MPI_NRank; TargetRank++)
+
+
+   delete [] InvData_Flu;
+
+
+// record the number of real patches
+   for (int lv=0; lv<NLEVEL; lv++)     
+   for (int m=1; m<28; m++)         patch->NPatchComma[lv][m] = patch->num[lv];
+
+
+// average over the data in finer patches to fill up the data in coarser patches 
+   for (int lv=NLEVEL-2; lv>=0; lv--)     
+      Flu_Restrict( lv, patch->FluSg[lv+1], patch->FluSg[lv], NULL_INT, NULL_INT, _FLU );
+
+
+// complete levels 0 ~ NLEVEL-1
+//=====================================================================================
+   for (int lv=0; lv<NLEVEL; lv++)
+   {
+//    allocate the buffer patches 
+      Buf_AllocateBufferPatch( patch, lv, 3, 0 );
+
+//    set up the BaseP List
+      if ( lv == 0 )    Init_RecordBasePatch();
+
+//    set up the BounP_IDMap 
+      Buf_RecordBoundaryPatch( lv );
+
+//    construct the sibling relation
+      SiblingSearch( lv );
+
+//    get the IDs of patches for sending and receiving data between neighbor ranks
+      Buf_RecordExchangeDataPatchID( lv );
+
+//    allocate the flux arrays at the level "lv-1"
+      if ( lv > 0  &&  patch->WithFlux )  Flu_AllocateFluxArray( lv-1 );
+
+//    fill up the data in the buffer patches
+      Buf_GetBufferData( lv, patch->FluSg[lv], NULL_INT, DATA_GENERAL, _FLU, FLU_PARA_BUF, USELB_NO );
+   }
+
+
+   if ( MPI_Rank == 0 )    Aux_Message( stdout, "Init_Reload_OldFormat ... done\n" ); 
+
+} // FUNCTION : Init_Reload_OldFormat
